@@ -3,7 +3,7 @@ import time
 import math
 import threading
 
-from USART import (
+from src.USART import (
     control_speed,
     send_upload_command,
     set_motor_parameter,

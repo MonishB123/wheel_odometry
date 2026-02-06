@@ -17,7 +17,7 @@ MOTOR_DIR = [1, -1, 1, -1]
 # Calibration from your measurement
 # -----------------------------
 # You measured: 800 ticks per wheel revolution = 0.208 m travel (20.8 cm)
-TICKS_PER_REV = 800
+TICKS_PER_REV = 1600
 DIST_PER_REV_M = 0.208
 
 METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV

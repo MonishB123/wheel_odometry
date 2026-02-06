@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-import time
-import math
-import threading
-
-from src.USART import (
-    control_speed,
-    send_upload_command,
-    set_motor_parameter,
-    receive_data,
-    ser,
-)
-
 # -----------------------------
 # Motor direction fix (your robot)
 # -----------------------------
@@ -20,7 +7,7 @@ MOTOR_DIR = [1, -1, 1, -1]
 # -----------------------------
 # Calibration from your measurement
 # -----------------------------
-# You measured: forward 800 ticks -> 21.75 cm = 0.2175 m
+# You measured: 800 ticks per wheel revolution = 0.147 m travel
 TICKS_PER_REV = 800
 DIST_PER_REV_M = 0.147
 
@@ -30,7 +17,7 @@ TICKS_PER_METER = TICKS_PER_REV / DIST_PER_REV_M      # ~3678.1609 ticks/m
 # -----------------------------
 # Robot geometry
 # -----------------------------
-TRACK_WIDTH_M = 0.28  # tune later (affects theta accuracy strongly)
+TRACK_WIDTH_M = 0.14  # 14 cm track width (wheel-to-wheel)
 
 # -----------------------------
 # Pose (x right, y forward, theta CCW)

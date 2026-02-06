@@ -20,8 +20,11 @@ MOTOR_DIR = [1, -1, 1, -1]
 TICKS_PER_REV = 800
 DIST_PER_REV_M = 0.147
 
-METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV      # 0.000271875 m/tick
-TICKS_PER_METER = TICKS_PER_REV / DIST_PER_REV_M      # ~3678.1609 ticks/m
+# Calibration scale from test: commanded 30 cm -> actual 15 cm, so scale = 2.0
+CALIB_SCALE = 2.0
+
+METERS_PER_TICK = (DIST_PER_REV_M / TICKS_PER_REV) / CALIB_SCALE
+TICKS_PER_METER = 1.0 / METERS_PER_TICK
 
 # -----------------------------
 # Robot geometry

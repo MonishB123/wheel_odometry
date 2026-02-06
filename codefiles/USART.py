@@ -9,7 +9,7 @@ MOTOR_TYPE = 1  #1:520电机 2:310电机 3:测速码盘TT电机 4:TT直流减速
 
 # 串口初始化    Serial port initialization
 ser = serial.Serial(
-    port='COM3',  # 根据实际情况修改为你的串口设备路径  Modify it to your serial port device path according to the actual situation
+    port='/dev/ttyUSB0',  # 根据实际情况修改为你的串口设备路径  Modify it to your serial port device path according to the actual situation
     baudrate=115200,      # 波特率，需与驱动板一致  Baud rate, must be consistent with the driver board
     parity=serial.PARITY_NONE,  # 无校验位  No check digit
     stopbits=serial.STOPBITS_ONE,  # 一个停止位 One stop bit

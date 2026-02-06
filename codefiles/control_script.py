@@ -1,4 +1,13 @@
 # -----------------------------
+# Imports
+# -----------------------------
+import math
+import threading
+import time
+
+from USART import control_speed, receive_data, send_upload_command, ser, set_motor_parameter
+
+# -----------------------------
 # Motor direction fix (your robot)
 # -----------------------------
 # M2 and M4 inverted

@@ -73,6 +73,7 @@ def parse_mall(msg: str):
 # Threads: receiver + odometry + printer
 # -----------------------------
 running = False
+input_active = False
 
 def _get_ticks():
     with ticks_lock:
@@ -124,9 +125,10 @@ def odom_loop(hz=60.0):
 def print_loop(hz=10.0):
     dt_target = 1.0 / hz
     while running:
-        t = _get_ticks()
-        s = f"ticks: M1={t[0]} M2={t[1]} M3={t[2]} M4={t[3]} | {pose_str()}"
-        print("\r" + s + " " * 10, end="", flush=True)
+        if not input_active:
+            t = _get_ticks()
+            s = f"ticks: M1={t[0]} M2={t[1]} M3={t[2]} M4={t[3]} | {pose_str()}"
+            print(s, flush=True)
         time.sleep(dt_target)
 
 # -----------------------------
@@ -257,7 +259,10 @@ def main():
 
     try:
         while True:
-            cmd = input("\n> ").strip().split()
+            input_active = True
+            raw = input("\n> ")
+            input_active = False
+            cmd = raw.strip().split()
             if not cmd:
                 continue
 

@@ -74,6 +74,7 @@ def parse_mall(msg: str):
 # -----------------------------
 running = False
 input_active = False
+print_active = False
 
 def _get_ticks():
     with ticks_lock:
@@ -125,7 +126,7 @@ def odom_loop(hz=60.0):
 def print_loop(hz=10.0):
     dt_target = 1.0 / hz
     while running:
-        if not input_active:
+        if print_active and not input_active:
             t = _get_ticks()
             s = f"ticks: M1={t[0]} M2={t[1]} M3={t[2]} M4={t[3]} | {pose_str()}"
             print(s, flush=True)
@@ -149,6 +150,7 @@ DEFAULT_SPEED_CMD = 300
 MOTION_TIMEOUT_S = 10.0
 
 def forward_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
+    global print_active
     ticks = abs(int(ticks))
     if ticks == 0:
         return
@@ -157,6 +159,7 @@ def forward_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
     t0 = time.time()
 
     drive_raw(speed_cmd, speed_cmd, speed_cmd, speed_cmd)
+    print_active = True
 
     while True:
         now = _get_ticks()
@@ -172,8 +175,10 @@ def forward_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
         time.sleep(0.005)
 
     stop()
+    print_active = False
 
 def rotate_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
+    global print_active
     ticks = int(ticks)
     if ticks == 0:
         return
@@ -185,6 +190,7 @@ def rotate_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
     t0 = time.time()
 
     drive_raw(+sign * speed_cmd, -sign * speed_cmd, -sign * speed_cmd, +sign * speed_cmd)
+    print_active = True
 
     while True:
         now = _get_ticks()
@@ -200,6 +206,7 @@ def rotate_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
         time.sleep(0.005)
 
     stop()
+    print_active = False
 
 # -----------------------------
 # NEW — rotate by degrees

@@ -18,6 +18,11 @@ install(TARGETS wheel_odometry_node
 
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
+  
+install(PROGRAMS
+  scripts/wheel_ticks_publisher.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()
 

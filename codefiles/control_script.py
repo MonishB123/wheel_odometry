@@ -75,6 +75,7 @@ def parse_mall(msg: str):
 running = False
 input_active = False
 print_active = False
+command_seen = False
 
 def _get_ticks():
     with ticks_lock:
@@ -126,7 +127,7 @@ def odom_loop(hz=60.0):
 def print_loop(hz=10.0):
     dt_target = 1.0 / hz
     while running:
-        if print_active and not input_active:
+        if command_seen and print_active and not input_active:
             t = _get_ticks()
             s = f"ticks: M1={t[0]} M2={t[1]} M3={t[2]} M4={t[3]} | {pose_str()}"
             print(s, flush=True)
@@ -239,7 +240,7 @@ def forward_m(m: float, speed_cmd: int = DEFAULT_SPEED_CMD):
 # Main
 # -----------------------------
 def main():
-    global running, x_m, y_m, theta_rad
+    global running, x_m, y_m, theta_rad, input_active, command_seen
 
     print("Initializing motor driver...")
 
@@ -272,13 +273,14 @@ def main():
             cmd = raw.strip().split()
             if not cmd:
                 continue
+            command_seen = True
 
             if cmd[0] == "f":
                 ticks = int(cmd[1])
                 speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
                 forward_ticks(ticks, speed)
 
-            elif cmd[0] == "fc":
+            elif cmd[0] in ("fc", "fd"):
                 cm = float(cmd[1])
                 speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
                 forward_cm(cm, speed)

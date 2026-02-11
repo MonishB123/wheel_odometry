@@ -91,7 +91,43 @@ def rx_loop():
                     latest_ticks[:] = t
         time.sleep(0.001)
 
-def integrate_pose_from_tick_delta(dL_ticks: float, dR_ticks: float):
+def integrate_pose_from_tick_delta(dL_ticks: float, dR_ticks: float):   
+    
+    """
+    Odometry integration for a differential-drive robot using encoder ticks.
+
+    Coordinate frame used in this script:
+    - x_m: positive to the robot's right
+    - y_m: positive forward
+    - theta_rad: positive counter-clockwise (CCW), wrapped to [-pi, pi)
+
+    Inputs:
+    - dL_ticks: incremental ticks for the LEFT side since last update
+    - dR_ticks: incremental ticks for the RIGHT side since last update
+
+    Steps:
+    1) Convert ticks to meters using the current calibration:
+       METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV
+       dL_m = dL_ticks * METERS_PER_TICK
+       dR_m = dR_ticks * METERS_PER_TICK
+
+    2) Compute the robot-center travel distance and heading change for this step:
+       d     = 0.5 * (dL_m + dR_m)
+       dtheta = (dR_m - dL_m) / TRACK_WIDTH_M
+       where TRACK_WIDTH_M is the wheel-to-wheel distance.
+
+    3) Integrate using the midpoint heading (first-order, small-step model):
+       th_mid = theta_rad + 0.5 * dtheta
+       x_m    += d * sin(th_mid)
+       y_m    += d * cos(th_mid)
+       theta_rad = wrap_pi(theta_rad + dtheta)
+
+    This is a standard differential-drive odometry update that assumes
+    small motion between updates and that left/right wheel motion represents
+    the robot's actual path (no slip). The midpoint heading improves accuracy
+    over using only the start heading for the entire step.
+    """
+
     global x_m, y_m, theta_rad
 
     dL_m = dL_ticks * METERS_PER_TICK

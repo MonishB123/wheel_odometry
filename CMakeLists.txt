@@ -21,6 +21,10 @@ install(DIRECTORY launch config
   
 install(PROGRAMS
   scripts/wheel_ticks_publisher.py
+  scripts/encoder_node.py
+  scripts/USART.py
+  scripts/pose_printer.py
+  DESTINATION lib/${PROJECT_NAME}
   DESTINATION lib/${PROJECT_NAME}
 )
 

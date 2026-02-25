@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+               cmake_minimum_required(VERSION 3.8)
 project(wheel_odometry)
 
 find_package(ament_cmake REQUIRED)
@@ -18,13 +18,14 @@ install(TARGETS wheel_odometry_node
 
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
-  
+
 install(PROGRAMS
-  scripts/encoder_node.py
-  scripts/USART.py
+  scripts/wheel_ticks_publisher.py
   scripts/pose_printer.py
+  scripts/encoder_node.py
+  scripts/real_wheel_ticks.py
+  scripts/USART.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()
-

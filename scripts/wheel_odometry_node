@@ -1,0 +1,273 @@
+import math
+import threading
+import time
+
+import rclpy
+from rclpy.node import Node
+
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TransformStamped
+import tf2_ros
+
+from USART import control_speed, receive_data, send_upload_command, ser, set_motor_parameter
+
+
+# -----------------------------
+# Motor direction fix
+# -----------------------------
+MOTOR_DIR = [1, -1, 1, -1]
+
+# -----------------------------
+# Calibration
+# -----------------------------
+TICKS_PER_REV = 1600
+DIST_PER_REV_M = 0.208
+
+METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV
+TICKS_PER_METER = 1.0 / METERS_PER_TICK
+
+# -----------------------------
+# Robot geometry
+# -----------------------------
+TRACK_WIDTH_M = 0.14
+
+
+# -----------------------------
+# Pose
+# -----------------------------
+x_m = 0.0
+y_m = 0.0
+theta_rad = 0.0
+
+
+def wrap_pi(a):
+    while a >= math.pi:
+        a -= 2 * math.pi
+    while a < -math.pi:
+        a += 2 * math.pi
+    return a
+
+
+# -----------------------------
+# Encoder ticks
+# -----------------------------
+latest_ticks = [0, 0, 0, 0]
+ticks_lock = threading.Lock()
+
+
+def parse_mall(msg):
+
+    msg = msg.strip()
+
+    if not (msg.startswith("$MAll:") and msg.endswith("#")):
+        return None
+
+    payload = msg[len("$MAll:"):-1]
+    parts = payload.split(",")
+
+    if len(parts) != 4:
+        return None
+
+    t = [int(p) for p in parts]
+    t = [t[i] * MOTOR_DIR[i] for i in range(4)]
+
+    return t
+
+
+def get_ticks():
+    with ticks_lock:
+        return latest_ticks[:]
+
+
+# -----------------------------
+# Serial RX Thread
+# -----------------------------
+def rx_loop():
+
+    while True:
+
+        msg = receive_data()
+
+        if msg:
+            t = parse_mall(msg)
+
+            if t is not None:
+                with ticks_lock:
+                    latest_ticks[:] = t
+
+        time.sleep(0.001)
+
+
+# -----------------------------
+# Odometry Integration
+# -----------------------------
+def integrate_pose_from_tick_delta(dL_ticks, dR_ticks):
+
+    global x_m, y_m, theta_rad
+
+    dL_m = dL_ticks * METERS_PER_TICK
+    dR_m = dR_ticks * METERS_PER_TICK
+
+    d = 0.5 * (dL_m + dR_m)
+    dtheta = (dR_m - dL_m) / TRACK_WIDTH_M
+
+    th_mid = theta_rad + 0.5 * dtheta
+
+    x_m += d * math.sin(th_mid)
+    y_m += d * math.cos(th_mid)
+
+    theta_rad = wrap_pi(theta_rad + dtheta)
+
+
+# -----------------------------
+# Motor Drive
+# -----------------------------
+def drive_raw(m1, m2, m3, m4):
+
+    m = [m1, m2, m3, m4]
+    m = [m[i] * MOTOR_DIR[i] for i in range(4)]
+
+    control_speed(m[0], m[1], m[2], m[3])
+
+
+def stop():
+    drive_raw(0, 0, 0, 0)
+
+
+# -----------------------------
+# ROS Node
+# -----------------------------
+class WheelOdomNode(Node):
+
+    def __init__(self):
+
+        super().__init__("wheel_odometry")
+
+        self.prev_ticks = get_ticks()
+
+        self.cmd_sub = self.create_subscription(
+            Twist,
+            "/cmd_vel",
+            self.cmd_vel_callback,
+            10
+        )
+
+        self.odom_pub = self.create_publisher(
+            Odometry,
+            "/odom",
+            10
+        )
+
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
+        self.timer = self.create_timer(
+            0.02,
+            self.update
+        )
+
+    # -----------------------------
+    # Nav2 velocity commands
+    # -----------------------------
+    def cmd_vel_callback(self, msg):
+
+        v = msg.linear.x
+        w = msg.angular.z
+
+        left = v - (TRACK_WIDTH_M / 2.0) * w
+        right = v + (TRACK_WIDTH_M / 2.0) * w
+
+        left_ticks = int(left * TICKS_PER_METER)
+        right_ticks = int(right * TICKS_PER_METER)
+
+        drive_raw(left_ticks, right_ticks, right_ticks, left_ticks)
+
+    # -----------------------------
+    # Update loop
+    # -----------------------------
+    def update(self):
+
+        global x_m, y_m, theta_rad
+
+        now = get_ticks()
+
+        dL = 0.5 * ((now[0] - self.prev_ticks[0]) + (now[3] - self.prev_ticks[3]))
+        dR = 0.5 * ((now[1] - self.prev_ticks[1]) + (now[2] - self.prev_ticks[2]))
+
+        integrate_pose_from_tick_delta(dL, dR)
+
+        self.prev_ticks = now
+
+        self.publish_odom()
+        self.publish_tf()
+
+    # -----------------------------
+    # Publish odometry
+    # -----------------------------
+    def publish_odom(self):
+
+        odom = Odometry()
+
+        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.frame_id = "odom"
+        odom.child_frame_id = "base_link"
+
+        odom.pose.pose.position.x = x_m
+        odom.pose.pose.position.y = y_m
+
+        qz = math.sin(theta_rad / 2)
+        qw = math.cos(theta_rad / 2)
+
+        odom.pose.pose.orientation.z = qz
+        odom.pose.pose.orientation.w = qw
+
+        self.odom_pub.publish(odom)
+
+    # -----------------------------
+    # Publish TF
+    # -----------------------------
+    def publish_tf(self):
+
+        t = TransformStamped()
+
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = "odom"
+        t.child_frame_id = "base_link"
+
+        t.transform.translation.x = x_m
+        t.transform.translation.y = y_m
+
+        qz = math.sin(theta_rad / 2)
+        qw = math.cos(theta_rad / 2)
+
+        t.transform.rotation.z = qz
+        t.transform.rotation.w = qw
+
+        self.tf_broadcaster.sendTransform(t)
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+
+    rclpy.init()
+
+    send_upload_command(1)
+    time.sleep(0.1)
+    set_motor_parameter()
+
+    threading.Thread(target=rx_loop, daemon=True).start()
+
+    node = WheelOdomNode()
+
+    rclpy.spin(node)
+
+    stop()
+    ser.close()
+
+    rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

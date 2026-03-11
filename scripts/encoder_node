@@ -35,3 +35,54 @@ class EncoderNode(Node):
         threading.Thread(target=self.rx_loop, daemon=True).start()
 
     def parse_mall(self, msg: str):
+            msg = msg.strip()
+            if not (msg.startswith("$MAll:") and msg.endswith("#")):
+                return None
+
+            payload = msg[len("$MAll:"):-1]
+            parts = payload.split(",")
+
+            if len(parts) != 4:
+                return None
+
+            # 1. Extract the raw numbers
+            m1 = int(parts[0])
+            m2 = int(parts[1])
+            m3 = int(parts[2])
+            m4 = int(parts[3])
+
+            # 2. INVERT THE REVERSED WHEELS
+            # Multiply the inverted wheels by -1 so they all read positive 
+            # when you push the robot straight forward.
+            m1 = m1 * 1
+            m2 = m2 * -1  # Flipped!
+            m3 = m3 * 1
+            m4 = m4 * -1  # Flipped!
+
+            # 3. Return the corrected list
+            # return [m1, m2, m3, m4]
+            return [m1, m2, m3, m4]
+
+    def rx_loop(self):
+        while self.running:
+            msg = receive_data()
+            if msg:
+                print(f"RAW: {repr(msg)}")
+                ticks = self.parse_mall(msg)
+                if ticks is not None:
+                    ros_msg = Int64MultiArray()
+                    ros_msg.data = ticks
+                    self.publisher_.publish(ros_msg)
+            time.sleep(0.001)
+
+
+def main():
+    rclpy.init()
+    node = EncoderNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import math
 import threading
 import time
@@ -14,28 +16,26 @@ from USART import control_speed, receive_data, send_upload_command, ser, set_mot
 
 
 # -----------------------------
-# Motor direction fix
+# Robot configuration
 # -----------------------------
+
 MOTOR_DIR = [1, -1, 1, -1]
 
-# -----------------------------
-# Calibration
-# -----------------------------
 TICKS_PER_REV = 1600
 DIST_PER_REV_M = 0.208
 
 METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV
 TICKS_PER_METER = 1.0 / METERS_PER_TICK
 
-# -----------------------------
-# Robot geometry
-# -----------------------------
 TRACK_WIDTH_M = 0.14
 
+CMD_SCALE = 800
+
 
 # -----------------------------
-# Pose
+# Robot pose
 # -----------------------------
+
 x_m = 0.0
 y_m = 0.0
 theta_rad = 0.0
@@ -52,6 +52,7 @@ def wrap_pi(a):
 # -----------------------------
 # Encoder ticks
 # -----------------------------
+
 latest_ticks = [0, 0, 0, 0]
 ticks_lock = threading.Lock()
 
@@ -81,8 +82,9 @@ def get_ticks():
 
 
 # -----------------------------
-# Serial RX Thread
+# Serial RX thread
 # -----------------------------
+
 def rx_loop():
 
     while True:
@@ -90,27 +92,28 @@ def rx_loop():
         msg = receive_data()
 
         if msg:
-            t = parse_mall(msg)
+            ticks = parse_mall(msg)
 
-            if t is not None:
+            if ticks is not None:
                 with ticks_lock:
-                    latest_ticks[:] = t
+                    latest_ticks[:] = ticks
 
         time.sleep(0.001)
 
 
 # -----------------------------
-# Odometry Integration
+# Odometry integration
 # -----------------------------
-def integrate_pose_from_tick_delta(dL_ticks, dR_ticks):
+
+def integrate_pose(dL_ticks, dR_ticks):
 
     global x_m, y_m, theta_rad
 
-    dL_m = dL_ticks * METERS_PER_TICK
-    dR_m = dR_ticks * METERS_PER_TICK
+    dL = dL_ticks * METERS_PER_TICK
+    dR = dR_ticks * METERS_PER_TICK
 
-    d = 0.5 * (dL_m + dR_m)
-    dtheta = (dR_m - dL_m) / TRACK_WIDTH_M
+    d = 0.5 * (dL + dR)
+    dtheta = (dR - dL) / TRACK_WIDTH_M
 
     th_mid = theta_rad + 0.5 * dtheta
 
@@ -121,8 +124,9 @@ def integrate_pose_from_tick_delta(dL_ticks, dR_ticks):
 
 
 # -----------------------------
-# Motor Drive
+# Motor driver
 # -----------------------------
+
 def drive_raw(m1, m2, m3, m4):
 
     m = [m1, m2, m3, m4]
@@ -138,6 +142,7 @@ def stop():
 # -----------------------------
 # ROS Node
 # -----------------------------
+
 class WheelOdomNode(Node):
 
     def __init__(self):
@@ -166,25 +171,31 @@ class WheelOdomNode(Node):
             self.update
         )
 
+        self.get_logger().info("Wheel odometry node started")
+
     # -----------------------------
-    # Nav2 velocity commands
+    # Velocity commands
     # -----------------------------
+
     def cmd_vel_callback(self, msg):
 
         v = msg.linear.x
         w = msg.angular.z
 
+        self.get_logger().info(f"CMD_VEL: {v:.2f} {w:.2f}")
+
         left = v - (TRACK_WIDTH_M / 2.0) * w
         right = v + (TRACK_WIDTH_M / 2.0) * w
 
-        left_ticks = int(left * TICKS_PER_METER)
-        right_ticks = int(right * TICKS_PER_METER)
+        left_cmd = int(left * CMD_SCALE)
+        right_cmd = int(right * CMD_SCALE)
 
-        drive_raw(left_ticks, right_ticks, right_ticks, left_ticks)
+        drive_raw(left_cmd, right_cmd, right_cmd, left_cmd)
 
     # -----------------------------
     # Update loop
     # -----------------------------
+
     def update(self):
 
         global x_m, y_m, theta_rad
@@ -194,7 +205,7 @@ class WheelOdomNode(Node):
         dL = 0.5 * ((now[0] - self.prev_ticks[0]) + (now[3] - self.prev_ticks[3]))
         dR = 0.5 * ((now[1] - self.prev_ticks[1]) + (now[2] - self.prev_ticks[2]))
 
-        integrate_pose_from_tick_delta(dL, dR)
+        integrate_pose(dL, dR)
 
         self.prev_ticks = now
 
@@ -204,6 +215,7 @@ class WheelOdomNode(Node):
     # -----------------------------
     # Publish odometry
     # -----------------------------
+
     def publish_odom(self):
 
         odom = Odometry()
@@ -226,6 +238,7 @@ class WheelOdomNode(Node):
     # -----------------------------
     # Publish TF
     # -----------------------------
+
     def publish_tf(self):
 
         t = TransformStamped()
@@ -249,6 +262,7 @@ class WheelOdomNode(Node):
 # -----------------------------
 # Main
 # -----------------------------
+
 def main():
 
     rclpy.init()

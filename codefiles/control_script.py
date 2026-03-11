@@ -1,361 +1,86 @@
-# -----------------------------
-# Imports
-# -----------------------------
-import math
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int64MultiArray
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from USART import receive_data, send_upload_command, set_motor_parameter
 import threading
 import time
 
-from USART import control_speed, receive_data, send_upload_command, ser, set_motor_parameter
 
-# -----------------------------
-# Motor direction fix (your robot)
-# -----------------------------
-# M2 and M4 inverted
-MOTOR_DIR = [1, -1, 1, -1]
+class EncoderNode(Node):
 
-# -----------------------------
-# Calibration from your measurement
-# -----------------------------
-# You measured: 800 ticks per wheel revolution = 0.208 m travel (20.8 cm)
-TICKS_PER_REV = 1600
-DIST_PER_REV_M = 0.208
+    def __init__(self):
+        super().__init__('encoder_node')
 
-METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV
-TICKS_PER_METER = 1.0 / METERS_PER_TICK
+        self.publisher_ = self.create_publisher(
+            Int64MultiArray,
+            'wheel_ticks',
+            10
+        )
 
-# -----------------------------
-# Robot geometry
-# -----------------------------
-TRACK_WIDTH_M = 0.14  # 14 cm track width (wheel-to-wheel)
+        self.get_logger().info("Real encoder node started")
 
-# -----------------------------
-# Pose (x right, y forward, theta CCW)
-# -----------------------------
-x_m = 0.0
-y_m = 0.0
-theta_rad = 0.0
-
-def wrap_pi(a):
-    while a >= math.pi:
-        a -= 2 * math.pi
-    while a < -math.pi:
-        a += 2 * math.pi
-    return a
-
-def pose_str():
-    return f"x={x_m: .3f} m, y={y_m: .3f} m, theta={math.degrees(theta_rad): .1f}°"
-
-# -----------------------------
-# Latest total encoder ticks from $MAll
-# -----------------------------
-latest_ticks = [0, 0, 0, 0]
-ticks_lock = threading.Lock()
-
-def parse_mall(msg: str):
-    """
-    Input:  "$MAll:123,456,789,101#"
-    Output: [t1,t2,t3,t4] as ints, direction-corrected with MOTOR_DIR
-    """
-    msg = msg.strip()
-    if not (msg.startswith("$MAll:") and msg.endswith("#")):
-        return None
-
-    payload = msg[len("$MAll:"):-1]
-    parts = payload.split(",")
-    if len(parts) != 4:
-        return None
-
-    t = [int(p) for p in parts]
-    t = [t[i] * MOTOR_DIR[i] for i in range(4)]
-    return t
-
-# -----------------------------
-# Threads: receiver + odometry + printer
-# -----------------------------
-running = False
-input_active = False
-print_active = False
-command_seen = False
-
-def _get_ticks():
-    with ticks_lock:
-        return latest_ticks[:]  # copy
-
-def rx_loop():
-    while running:
-        msg = receive_data()
-        if msg:
-            t = parse_mall(msg)
-            if t is not None:
-                with ticks_lock:
-                    latest_ticks[:] = t
-        time.sleep(0.001)
-
-def integrate_pose_from_tick_delta(dL_ticks: float, dR_ticks: float):   
-    
-    """
-    Odometry integration for a differential-drive robot using encoder ticks.
-
-    Coordinate frame used in this script:
-    - x_m: positive to the robot's right
-    - y_m: positive forward
-    - theta_rad: positive counter-clockwise (CCW), wrapped to [-pi, pi)
-
-    Inputs:
-    - dL_ticks: incremental ticks for the LEFT side since last update
-    - dR_ticks: incremental ticks for the RIGHT side since last update
-
-    Steps:
-    1) Convert ticks to meters using the current calibration:
-       METERS_PER_TICK = DIST_PER_REV_M / TICKS_PER_REV
-       dL_m = dL_ticks * METERS_PER_TICK
-       dR_m = dR_ticks * METERS_PER_TICK
-
-    2) Compute the robot-center travel distance and heading change for this step:
-       d     = 0.5 * (dL_m + dR_m)
-       dtheta = (dR_m - dL_m) / TRACK_WIDTH_M
-       where TRACK_WIDTH_M is the wheel-to-wheel distance.
-
-    3) Integrate using the midpoint heading (first-order, small-step model):
-       th_mid = theta_rad + 0.5 * dtheta
-       x_m    += d * sin(th_mid)
-       y_m    += d * cos(th_mid)
-       theta_rad = wrap_pi(theta_rad + dtheta)
-
-    This is a standard differential-drive odometry update that assumes
-    small motion between updates and that left/right wheel motion represents
-    the robot's actual path (no slip). The midpoint heading improves accuracy
-    over using only the start heading for the entire step.
-    """
-
-    global x_m, y_m, theta_rad
-
-    dL_m = dL_ticks * METERS_PER_TICK
-    dR_m = dR_ticks * METERS_PER_TICK
-
-    d = 0.5 * (dL_m + dR_m)
-    dtheta = (dR_m - dL_m) / TRACK_WIDTH_M
-
-    th_mid = theta_rad + 0.5 * dtheta
-    x_m += d * math.sin(th_mid)
-    y_m += d * math.cos(th_mid)
-    theta_rad = wrap_pi(theta_rad + dtheta)
-
-def odom_loop(hz=60.0):
-    dt_target = 1.0 / hz
-    prev = _get_ticks()
-
-    while running:
-        t0 = time.time()
-        now = _get_ticks()
-
-        dL_ticks = 0.5 * ((now[0] - prev[0]) + (now[3] - prev[3]))
-        dR_ticks = 0.5 * ((now[1] - prev[1]) + (now[2] - prev[2]))
-
-        integrate_pose_from_tick_delta(dL_ticks, dR_ticks)
-
-        prev = now
-        elapsed = time.time() - t0
-        sleep_t = dt_target - elapsed
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-
-def print_loop(hz=10.0):
-    dt_target = 1.0 / hz
-    while running:
-        if command_seen and print_active and not input_active:
-            t = _get_ticks()
-            s = f"ticks: M1={t[0]} M2={t[1]} M3={t[2]} M4={t[3]} | {pose_str()}"
-            print(s, flush=True)
-        time.sleep(dt_target)
-
-# -----------------------------
-# Motor commands
-# -----------------------------
-def drive_raw(m1, m2, m3, m4):
-    m = [m1, m2, m3, m4]
-    m = [m[i] * MOTOR_DIR[i] for i in range(4)]
-    control_speed(m[0], m[1], m[2], m[3])
-
-def stop():
-    drive_raw(0, 0, 0, 0)
-
-# -----------------------------
-# Tick-based motion primitives
-# -----------------------------
-DEFAULT_SPEED_CMD = 300
-MOTION_TIMEOUT_S = 10.0
-
-def forward_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
-    global print_active
-    ticks = abs(int(ticks))
-    if ticks == 0:
-        return
-
-    start = _get_ticks()
-    t0 = time.time()
-
-    drive_raw(speed_cmd, speed_cmd, speed_cmd, speed_cmd)
-    print_active = True
-
-    while True:
-        now = _get_ticks()
-        dL = 0.5 * ((now[0] - start[0]) + (now[3] - start[3]))
-        dR = 0.5 * ((now[1] - start[1]) + (now[2] - start[2]))
-        d = 0.5 * (dL + dR)
-
-        if d >= ticks:
-            break
-        if (time.time() - t0) > MOTION_TIMEOUT_S:
-            print("\n[WARN] forward_ticks timeout; stopping for safety.")
-            break
-        time.sleep(0.005)
-
-    stop()
-    print_active = False
-
-def rotate_ticks(ticks: int, speed_cmd: int = DEFAULT_SPEED_CMD):
-    global print_active
-    ticks = int(ticks)
-    if ticks == 0:
-        return
-
-    target = abs(ticks)
-    sign = 1 if ticks > 0 else -1
-
-    start = _get_ticks()
-    t0 = time.time()
-
-    drive_raw(+sign * speed_cmd, -sign * speed_cmd, -sign * speed_cmd, +sign * speed_cmd)
-    print_active = True
-
-    while True:
-        now = _get_ticks()
-        dL = 0.5 * ((now[0] - start[0]) + (now[3] - start[3]))
-        dR = 0.5 * ((now[1] - start[1]) + (now[2] - start[2]))
-        diff = abs(dR - dL)
-
-        if diff >= target:
-            break
-        if (time.time() - t0) > MOTION_TIMEOUT_S:
-            print("\n[WARN] rotate_ticks timeout; stopping for safety.")
-            break
-        time.sleep(0.005)
-
-    stop()
-    print_active = False
-
-# -----------------------------
-# NEW — rotate by degrees
-# -----------------------------
-def rotate_degrees(deg: float, speed_cmd: int = DEFAULT_SPEED_CMD):
-    """
-    Convert degrees -> ticks using robot geometry + real tick distance.
-    Positive deg = CCW, negative deg = CW.
-    """
-    theta = math.radians(deg)
-
-    # distance one side travels for half the robot width
-    ticks_per_side = (TRACK_WIDTH_M * 0.5 * abs(theta)) / METERS_PER_TICK
-
-    # rotate_ticks() uses target = |dR - dL| = 2 * ticks_per_side
-    diff_ticks_target = int(round(2.0 * ticks_per_side))
-
-    rotate_ticks(diff_ticks_target if deg >= 0 else -diff_ticks_target, speed_cmd)
-
-# Convenience forward functions
-def forward_cm(cm: float, speed_cmd: int = DEFAULT_SPEED_CMD):
-    ticks = int(round((cm / 100.0) * TICKS_PER_METER))
-    forward_ticks(ticks, speed_cmd)
-
-def forward_m(m: float, speed_cmd: int = DEFAULT_SPEED_CMD):
-    ticks = int(round(m * TICKS_PER_METER))
-    forward_ticks(ticks, speed_cmd)
-
-# -----------------------------
-# Main
-# -----------------------------
-def main():
-    global running, x_m, y_m, theta_rad, input_active, command_seen
-
-    print("Initializing motor driver...")
-
-    send_upload_command(1)  # total encoder ticks
-    time.sleep(0.1)
-    set_motor_parameter()
-    time.sleep(0.1)
-
-    running = True
-    threading.Thread(target=rx_loop, daemon=True).start()
-    threading.Thread(target=odom_loop, daemon=True).start()
-    threading.Thread(target=print_loop, daemon=True).start()
-
-    print("\nReady.")
-    print("Commands:")
-    print("  f <ticks> [speed]    -> forward by ticks")
-    print("  fc <cm> [speed]      -> forward by centimeters")
-    print("  fm <m> [speed]       -> forward by meters")
-    print("  r <ticks> [speed]    -> rotate by ticks")
-    print("  rd <deg> [speed]     -> rotate by degrees  <--- NEW")
-    print("  s                    -> stop")
-    print("  reset                -> reset pose")
-    print("  q                    -> quit")
-
-    try:
-        while True:
-            input_active = True
-            raw = input("\n> ")
-            input_active = False
-            cmd = raw.strip().split()
-            if not cmd:
-                continue
-            command_seen = True
-
-            if cmd[0] == "f":
-                ticks = int(cmd[1])
-                speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
-                forward_ticks(ticks, speed)
-
-            elif cmd[0] in ("fc", "fd"):
-                cm = float(cmd[1])
-                speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
-                forward_cm(cm, speed)
-
-            elif cmd[0] == "fm":
-                m = float(cmd[1])
-                speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
-                forward_m(m, speed)
-
-            elif cmd[0] == "r":
-                ticks = int(cmd[1])
-                speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
-                rotate_ticks(ticks, speed)
-
-            elif cmd[0] == "rd":  # NEW
-                deg = float(cmd[1])
-                speed = int(cmd[2]) if len(cmd) > 2 else DEFAULT_SPEED_CMD
-                rotate_degrees(deg, speed)
-
-            elif cmd[0] == "s":
-                stop()
-
-            elif cmd[0] == "reset":
-                x_m = y_m = theta_rad = 0.0
-                print("Pose reset.")
-
-            elif cmd[0] == "q":
-                stop()
-                break
-
-            else:
-                print("Unknown command.")
-
-    finally:
-        running = False
-        stop()
+        # Setup serial
+        send_upload_command(1)
         time.sleep(0.1)
-        ser.close()
-        print("\nStopped. Final:", pose_str(), "| ticks:", _get_ticks())
+        set_motor_parameter()
+        time.sleep(0.1)
 
-if __name__ == "__main__":
+        self.running = True
+        threading.Thread(target=self.rx_loop, daemon=True).start()
+
+    def parse_mall(self, msg: str):
+            msg = msg.strip()
+            if not (msg.startswith("$MAll:") and msg.endswith("#")):
+                return None
+
+            payload = msg[len("$MAll:"):-1]
+            parts = payload.split(",")
+
+            if len(parts) != 4:
+                return None
+
+            # 1. Extract the raw numbers
+            m1 = int(parts[0])
+            m2 = int(parts[1])
+            m3 = int(parts[2])
+            m4 = int(parts[3])
+
+            # 2. INVERT THE REVERSED WHEELS
+            # Multiply the inverted wheels by -1 so they all read positive 
+            # when you push the robot straight forward.
+            m1 = m1 * 1
+            m2 = m2 * -1  # Flipped!
+            m3 = m3 * 1
+            m4 = m4 * -1  # Flipped!
+
+            # 3. Return the corrected list
+            # return [m1, m2, m3, m4]
+            return [m1, m2, m3, m4]
+
+    def rx_loop(self):
+        while self.running:
+            msg = receive_data()
+            if msg:
+                print(f"RAW: {repr(msg)}")
+                ticks = self.parse_mall(msg)
+                if ticks is not None:
+                    ros_msg = Int64MultiArray()
+                    ros_msg.data = ticks
+                    self.publisher_.publish(ros_msg)
+            time.sleep(0.001)
+
+
+def main():
+    rclpy.init()
+    node = EncoderNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
     main()

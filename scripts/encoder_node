@@ -2,14 +2,15 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Int64MultiArray
+from std_msgs.msg import Int64MultiArray, Float64MultiArray
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from USART import receive_data, send_upload_command, set_motor_parameter
 import threading
 import time
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from USART import receive_data, send_upload_command, set_motor_parameter
 
 
 class EncoderNode(Node):
@@ -17,13 +18,41 @@ class EncoderNode(Node):
     def __init__(self):
         super().__init__('encoder_node')
 
-        self.publisher_ = self.create_publisher(
+        # Publishes simplified side ticks:
+        # data[0] = left_ticks
+        # data[1] = right_ticks
+        self.tick_pub = self.create_publisher(
             Int64MultiArray,
             'wheel_ticks',
             10
         )
 
+        # Publishes side velocities in m/s:
+        # data[0] = left_velocity_mps
+        # data[1] = right_velocity_mps
+        self.vel_pub = self.create_publisher(
+            Float64MultiArray,
+            'wheel_velocities',
+            10
+        )
+
         self.get_logger().info("Real encoder node started")
+
+        # -----------------------------
+        # Calibration / geometry
+        # -----------------------------
+        self.TICKS_PER_REV = 1600
+        self.DIST_PER_REV_M = 0.208
+        self.METERS_PER_TICK = self.DIST_PER_REV_M / self.TICKS_PER_REV
+
+        # Motor direction correction
+        # M2 and M4 inverted
+        self.MOTOR_DIR = [1, -1, 1, -1]
+
+        # Store previous side ticks for velocity estimation
+        self.prev_left_ticks = None
+        self.prev_right_ticks = None
+        self.prev_time = None
 
         # Setup serial
         send_upload_command(1)
@@ -35,33 +64,78 @@ class EncoderNode(Node):
         threading.Thread(target=self.rx_loop, daemon=True).start()
 
     def parse_mall(self, msg: str):
-            msg = msg.strip()
-            if not (msg.startswith("$MAll:") and msg.endswith("#")):
-                return None
+        """
+        Parse:
+            $MAll:m1,m2,m3,m4#
+        Return corrected 4-wheel ticks after applying motor direction fix.
+        """
+        msg = msg.strip()
+        if not (msg.startswith("$MAll:") and msg.endswith("#")):
+            return None
 
-            payload = msg[len("$MAll:"):-1]
-            parts = payload.split(",")
+        payload = msg[len("$MAll:"):-1]
+        parts = payload.split(",")
 
-            if len(parts) != 4:
-                return None
+        if len(parts) != 4:
+            return None
 
-            # 1. Extract the raw numbers
-            m1 = int(parts[0])
-            m2 = int(parts[1])
-            m3 = int(parts[2])
-            m4 = int(parts[3])
+        try:
+            ticks = [int(p) for p in parts]
+        except ValueError:
+            return None
 
-            # 2. INVERT THE REVERSED WHEELS
-            # Multiply the inverted wheels by -1 so they all read positive 
-            # when you push the robot straight forward.
-            m1 = m1 * 1
-            m2 = m2 * -1  # Flipped!
-            m3 = m3 * 1
-            m4 = m4 * -1  # Flipped!
+        ticks = [ticks[i] * self.MOTOR_DIR[i] for i in range(4)]
+        return ticks
 
-            # 3. Return the corrected list
-            # return [m1, m2, m3, m4]
-            return [m1, m2, m3, m4]
+    def simplify_to_sides(self, ticks):
+        """
+        Collapse 4 wheels into left/right side ticks.
+
+        Assumes:
+        - M1 and M4 are LEFT side
+        - M2 and M3 are RIGHT side
+
+        Returns:
+            left_ticks, right_ticks
+        """
+        left_ticks = int(round(0.5 * (ticks[0] + ticks[3])))
+        right_ticks = int(round(0.5 * (ticks[1] + ticks[2])))
+        return left_ticks, right_ticks
+
+    def publish_side_ticks(self, left_ticks, right_ticks):
+        msg = Int64MultiArray()
+        msg.data = [left_ticks, right_ticks]
+        self.tick_pub.publish(msg)
+
+    def publish_side_velocities(self, left_mps, right_mps):
+        msg = Float64MultiArray()
+        msg.data = [left_mps, right_mps]
+        self.vel_pub.publish(msg)
+
+    def update_and_publish_velocity(self, left_ticks, right_ticks):
+        now = time.time()
+
+        if self.prev_left_ticks is None or self.prev_right_ticks is None or self.prev_time is None:
+            self.prev_left_ticks = left_ticks
+            self.prev_right_ticks = right_ticks
+            self.prev_time = now
+            return
+
+        dt = now - self.prev_time
+        if dt <= 0.0:
+            return
+
+        d_left_ticks = left_ticks - self.prev_left_ticks
+        d_right_ticks = right_ticks - self.prev_right_ticks
+
+        left_mps = (d_left_ticks * self.METERS_PER_TICK) / dt
+        right_mps = (d_right_ticks * self.METERS_PER_TICK) / dt
+
+        self.publish_side_velocities(left_mps, right_mps)
+
+        self.prev_left_ticks = left_ticks
+        self.prev_right_ticks = right_ticks
+        self.prev_time = now
 
     def rx_loop(self):
         while self.running:
@@ -69,19 +143,32 @@ class EncoderNode(Node):
             if msg:
                 print(f"RAW: {repr(msg)}")
                 ticks = self.parse_mall(msg)
+
                 if ticks is not None:
-                    ros_msg = Int64MultiArray()
-                    ros_msg.data = ticks
-                    self.publisher_.publish(ros_msg)
+                    # Simplify 4-wheel encoder data into 2-side model
+                    left_ticks, right_ticks = self.simplify_to_sides(ticks)
+
+                    # Publish simplified ticks
+                    self.publish_side_ticks(left_ticks, right_ticks)
+
+                    # Estimate and publish side velocities
+                    self.update_and_publish_velocity(left_ticks, right_ticks)
+
             time.sleep(0.001)
+
+    def destroy_node(self):
+        self.running = False
+        super().destroy_node()
 
 
 def main():
     rclpy.init()
     node = EncoderNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
